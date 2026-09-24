@@ -222,6 +222,21 @@ check_port_free() {
 
 issue_cert_le() {
   step "申请 Let's Encrypt 证书: $DOMAIN"
+
+  # 已有有效证书 (>30天) 直接复用, 避免重复签发触发 LE 限流
+  if [[ -f "${CERT_DIR}/fullchain.pem" && -f "${CERT_DIR}/private.key" ]] && \
+     openssl x509 -in "${CERT_DIR}/fullchain.pem" -noout -checkend 2592000 >/dev/null 2>&1 && \
+     openssl x509 -in "${CERT_DIR}/fullchain.pem" -noout -text 2>/dev/null | grep -q "$DOMAIN"; then
+    info "检测到现有有效证书, 跳过签发直接复用"
+    if [[ -f ~/.acme.sh/acme.sh ]]; then
+      ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
+        --fullchain-file "${CERT_DIR}/fullchain.pem" \
+        --key-file "${CERT_DIR}/private.key" \
+        --reloadcmd "systemctl restart sing-box 2>/dev/null || service sing-box restart 2>/dev/null || true" 2>/dev/null || true
+    fi
+    return 0
+  fi
+
   check_port_free 80
 
   # 解析检查
@@ -311,7 +326,6 @@ write_config() {
     cat > "$CONFIG_FILE" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
-  "dns": { "servers": [{ "tag": "google", "address": "tls://8.8.8.8" }] },
   "inbounds": [
     {
       "type": "vless",
