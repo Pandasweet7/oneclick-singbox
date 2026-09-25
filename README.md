@@ -7,7 +7,7 @@
 把 `USER/REPO` 换成你自己的 GitHub 用户名和仓库名, 在 VPS 上执行:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/USER/REPO/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/Pandasweet7/oneclick-singbox/main/install.sh)
 ```
 
  domestic 机器 GitHub raw 连不通时可用代理镜像:
