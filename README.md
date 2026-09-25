@@ -40,9 +40,9 @@ git push -u origin main
 
 | 节点 | 默认端口 | 说明 |
 |---|---|---|
-| VLESS + Reality + Vision | 443/tcp | 无需域名, 防封主力 |
+| VLESS + Reality + Vision | 443/tcp | 无需证书; 客户端地址默认用域名 (隐藏真实 IP, 需域名解析到本机), 可用 `--reality-addr` 覆盖 |
 | VLESS + WS + TLS | 8443/tcp | 需要域名 + LE 证书 |
-| Hysteria2 | 8444/udp | 需要域名 + LE 证书, 无域名时用自签 |
+| Hysteria2 + salamander 混淆 | 8444/udp | 需要域名 + LE 证书, 混淆密码自动随机生成; 客户端需填 `obfs=salamander` + 混淆密码 |
 
 安装过程自动完成:
 
@@ -57,7 +57,7 @@ git push -u origin main
 ## 前置条件
 
 1. VPS: Debian/Ubuntu/CentOS, root 用户, amd64/arm64
-2. 域名已 `A 记录` 解析到 VPS 公网 IP (无域名可留空体验 Reality)
+2. 域名已 `A 记录` 解析到 VPS 公网 IP (Reality 用域名时同样要求; 若有 AAAA 记录, 须确认指向本机, 否则删掉, 免得客户端优先走不可达的 IPv6)
 3. `80` 端口空闲 (签发证书用, 签完可关), `443/8443/tcp + 8444/udp` 未被占用
 
 ## 非交互安装 (写脚本/批量用)
@@ -67,6 +67,8 @@ curl -LO https://raw.githubusercontent.com/USER/REPO/main/install.sh
 chmod +x install.sh
 sudo ./install.sh --domain example.com --email admin@example.com \
   --reality-port 443 --ws-port 8443 --hy2-port 8444 --yes
+# Reality 默认用 --domain 当客户端地址; 换另一个域名:
+# sudo ./install.sh --domain example.com --reality-addr reality.example.com --yes
 ```
 
 ## 常用管理

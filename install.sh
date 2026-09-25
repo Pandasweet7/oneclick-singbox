@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 ###############################################################################
 # sing-box 服务器端一键安装脚本
-# 功能: 一键安装 VLESS+Reality(TCP443) + VLESS+WS+TLS + Hysteria2
+# 功能: 一键安装 VLESS+Reality(域名地址/TCP443) + VLESS+WS+TLS + Hysteria2(salamander混淆)
 # 系统: Debian / Ubuntu / CentOS / Rocky / Alma / Fedora
 # 作者: 自用托管脚本, 可放在自己 GitHub 仓库 raw 直链一键调用
 #
@@ -36,6 +36,7 @@ REALITY_PORT="${REALITY_PORT:-443}"
 WS_PORT="${WS_PORT:-8443}"
 HY2_PORT="${HY2_PORT:-8444}"
 REALITY_SERVER="${REALITY_SERVER:-www.microsoft.com}"
+REALITY_ADDR=""   # Reality 客户端连接地址, 为空则默认等于 DOMAIN(有域名时), 否则用服务器IP
 DOMAIN=""
 EMAIL=""
 WS_PATH=""
@@ -179,6 +180,14 @@ ask_params() {
     [[ -z "$EMAIL" ]] && EMAIL="admin@${DOMAIN}"
   fi
 
+  if [[ -z "$REALITY_ADDR" ]]; then
+    _def_addr="${DOMAIN:-$SERVER_IP}"
+    echo -e "${CYAN}Reality 节点地址用域名可隐藏真实 IP (该域名必须已解析到本机 ${SERVER_IP})${PLAIN}"
+    read -rp "Reality 地址 [默认 ${_def_addr}]: " _ra || true
+    _ra="$(echo "${_ra:-}" | xargs)"
+    REALITY_ADDR="${_ra:-$_def_addr}"
+  fi
+
   read -rp "Reality 端口 [默认 ${REALITY_PORT}]: " _p1 || true
   [[ -n "${_p1:-}" ]] && REALITY_PORT="$_p1"
   read -rp "WS+TLS 端口 [默认 ${WS_PORT}]: " _p2 || true
@@ -200,6 +209,7 @@ ask_params() {
 
   echo
   info "域名       : ${DOMAIN:-<空,仅Reality>}"
+  info "Reality地址: $REALITY_ADDR"
   info "Reality端口: $REALITY_PORT"
   info "WS+TLS端口 : $WS_PORT"
   info "HY2端口    : $HY2_PORT (UDP)"
@@ -306,6 +316,9 @@ write_config() {
   gen_reality_keypair
   SHORT_ID="$(gen_shortid)"
   HY2_PASS="$(rand_hex 12)"
+  HY2_OBFS="$(rand_hex 8)"   # salamander 混淆密码 (16位hex)
+  # Reality 地址默认等于域名(隐藏真实IP), 无域名时用IP; 命令行 --reality-addr 可覆盖
+  [[ -z "${REALITY_ADDR:-}" ]] && REALITY_ADDR="${DOMAIN:-$SERVER_IP}"
 
   if [[ -n "$DOMAIN" ]]; then
     issue_cert_le
@@ -370,6 +383,7 @@ write_config() {
       "listen": "::",
       "listen_port": ${HY2_PORT},
       "users": [{ "password": "${HY2_PASS}" }],
+      "obfs": { "type": "salamander", "password": "${HY2_OBFS}" },
       "ignore_client_bandwidth": false,
       "masquerade": "https://www.bing.com",
       "tls": {
@@ -413,6 +427,7 @@ EOF
       "listen": "::",
       "listen_port": ${HY2_PORT},
       "users": [{ "password": "${HY2_PASS}" }],
+      "obfs": { "type": "salamander", "password": "${HY2_OBFS}" },
       "ignore_client_bandwidth": false,
       "masquerade": "https://www.bing.com",
       "tls": {
@@ -440,6 +455,8 @@ REALITY_PRIV=${REALITY_PRIV}
 REALITY_PUB=${REALITY_PUB}
 SHORT_ID=${SHORT_ID}
 HY2_PASS=${HY2_PASS}
+HY2_OBFS=${HY2_OBFS}
+REALITY_ADDR=${REALITY_ADDR}
 DOMAIN=${DOMAIN}
 SNI_DOMAIN=${SNI_DOMAIN}
 REALITY_PORT=${REALITY_PORT}
@@ -530,17 +547,20 @@ show_info() {
   SERVER_IP="${SERVER_IP:-$SERVER_IP}"
 
   local reality_link="" ws_link="" hy2_link=""
-  local host_for_reality="${SERVER_IP}"
+  # 兼容老版本 meta.env (没有 REALITY_ADDR/HY2_OBFS 字段)
+  local reality_host="${REALITY_ADDR:-${DOMAIN:-$SERVER_IP}}"
 
-  reality_link="vless://${UUID}@${host_for_reality}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${SHORT_ID}&type=tcp#VLESS-Reality-${host_for_reality}"
+  reality_link="vless://${UUID}@${reality_host}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SERVER}&fp=chrome&pbk=${REALITY_PUB}&sid=${SHORT_ID}&type=tcp#VLESS-Reality-${reality_host}"
 
   if [[ -n "${DOMAIN:-}" ]]; then
-    local enc_path
+    local enc_path hy2_extra=""
     enc_path="$(urlencode "$WS_PATH")"
     ws_link="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&fp=chrome&type=ws&host=${DOMAIN}&path=${enc_path}#VLESS-WS-TLS-${DOMAIN}"
-    hy2_link="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&insecure=0#Hysteria2-${DOMAIN}"
+    [[ -n "${HY2_OBFS:-}" ]] && hy2_extra="&obfs=salamander&obfs-password=${HY2_OBFS}"
+    hy2_link="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&insecure=0${hy2_extra}#Hysteria2-${DOMAIN}"
   else
-    hy2_link="hysteria2://${HY2_PASS}@${SERVER_IP}:${HY2_PORT}/?sni=${SNI_DOMAIN}&insecure=1#Hysteria2-${SERVER_IP}"
+    [[ -n "${HY2_OBFS:-}" ]] && hy2_extra="&obfs=salamander&obfs-password=${HY2_OBFS}"
+    hy2_link="hysteria2://${HY2_PASS}@${SERVER_IP}:${HY2_PORT}/?sni=${SNI_DOMAIN}&insecure=1${hy2_extra}#Hysteria2-${SERVER_IP}"
   fi
 
   {
@@ -549,7 +569,7 @@ show_info() {
     echo "UUID: ${UUID}"
     echo ""
     echo "--- VLESS + Reality ---"
-    echo "地址: ${SERVER_IP}  端口: ${REALITY_PORT}"
+    echo "地址: ${reality_host}  端口: ${REALITY_PORT}"
     echo "SNI: ${REALITY_SERVER}  指纹: chrome"
     echo "公钥(pbk): ${REALITY_PUB}"
     echo "shortId(sid): ${SHORT_ID}  流控: xtls-rprx-vision"
@@ -563,8 +583,9 @@ show_info() {
       echo "链接:"
       echo "${ws_link}"
       echo ""
-      echo "--- Hysteria2 ---"
+      echo "--- Hysteria2 (salamander 混淆) ---"
       echo "地址: ${DOMAIN}  端口: ${HY2_PORT} (UDP)  密码: ${HY2_PASS}"
+      echo "混淆: salamander  混淆密码: ${HY2_OBFS:-<老配置无混淆, 重装后生效>}"
       echo "SNI: ${DOMAIN}  ALPN: h3"
       echo "链接:"
       echo "${hy2_link}"
@@ -573,8 +594,9 @@ show_info() {
     else
       echo "(无域名, 未安装 WS+TLS 节点)"
       echo ""
-      echo "--- Hysteria2 (自签, 客户端需 insecure=1) ---"
+      echo "--- Hysteria2 (自签+salamander, 客户端需 insecure=1) ---"
       echo "地址: ${SERVER_IP}  端口: ${HY2_PORT} (UDP)  密码: ${HY2_PASS}"
+      echo "混淆: salamander  混淆密码: ${HY2_OBFS:-<老配置无混淆, 重装后生效>}"
       echo "链接:"
       echo "${hy2_link}"
     fi
@@ -636,6 +658,7 @@ usage() {
   --hy2-port PORT          默认 8444
   --ws-path /xxx           默认随机
   --reality-server NAME    默认 www.microsoft.com
+  --reality-addr ADDR      Reality 客户端连接地址, 默认等于 --domain(无域名时用IP)
   --yes                    跳过确认
 EOF
 }
@@ -660,6 +683,8 @@ while [[ $# -gt 0 ]]; do
     --ws-path=*) WS_PATH="${1#*=}"; shift ;;
     --reality-server) REALITY_SERVER="$2"; shift 2 ;;
     --reality-server=*) REALITY_SERVER="${1#*=}"; shift ;;
+    --reality-addr) REALITY_ADDR="$2"; shift 2 ;;
+    --reality-addr=*) REALITY_ADDR="${1#*=}"; shift ;;
     --yes|-y) AUTO_YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 1 ;;
@@ -674,6 +699,7 @@ case "$ACTION" in
       # 非交互: 补默认值后直接装
       check_root; check_os; install_deps; get_server_ip
       [[ -z "$WS_PATH" ]] && WS_PATH="/$(rand_hex 4)-ws"
+      [[ -z "${REALITY_ADDR:-}" ]] && REALITY_ADDR="${DOMAIN:-$SERVER_IP}"
       [[ -z "$EMAIL" && -n "$DOMAIN" ]] && EMAIL="admin@${DOMAIN}"
       install_singbox; write_config; setup_systemd; open_firewall
       cp -f "$0" "$SCRIPT_COPY" 2>/dev/null || true
