@@ -74,8 +74,15 @@ sudo ./install.sh --domain example.com --email admin@example.com \
 ## 常用管理
 
 ```bash
+# 管理菜单 (更新内核 / 查看节点 / 修改配置 / 卸载)
+sb
+# 等价于: bash /etc/sing-box/install.sh menu
+
 # 查看节点信息
 bash install.sh info
+
+# 只更新 sing-box 内核 (保留现有节点配置, 自动备份+回滚)
+bash install.sh update
 
 # 校验配置
 sing-box check -c /etc/sing-box/config.json

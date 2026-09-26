@@ -624,10 +624,168 @@ do_install() {
   write_config
   setup_systemd
   open_firewall
-  # 备份脚本自身方便日后 info/uninstall
+  # 备份脚本自身方便日后 info/uninstall, 并创建 sb 快捷命令
   cp -f "$0" "$SCRIPT_COPY" 2>/dev/null || true
+  ln -sf "$SCRIPT_COPY" /usr/local/bin/sb 2>/dev/null || true
   step "安装完成"
   show_info
+}
+
+do_edit_config() {
+  check_root
+  [[ -f "$CONFIG_FILE" ]] || pause_exit "未找到 $CONFIG_FILE, 请先安装"
+  # shellcheck disable=SC1091
+  [[ -f "${CONFIG_DIR}/meta.env" ]] && . "${CONFIG_DIR}/meta.env"
+  cp -f "$CONFIG_FILE" "${CONFIG_FILE}.bak-$(date +%F_%H%M)"
+  echo "配置已备份: ${CONFIG_FILE}.bak-*"
+  echo
+  echo "  1) 更换 UUID (Reality/WS 共用, 旧客户端立即失效)"
+  echo "  2) 更换端口 (Reality/WS/HY2)"
+  echo "  3) 更换 Reality 地址 (只改客户端显示, 需域名已解析到本机)"
+  echo "  4) 更换 HY2 密码 + 混淆密码"
+  echo "  0) 返回"
+  read -rp "请选择 [0-4]: " _e || return 0
+  case "$_e" in
+    1)
+      NEW_UUID="$(rand_uuid)"
+      UUID="$NEW_UUID" REALITY_ADDR="${REALITY_ADDR:-}" python3 - <<'PYEOF'
+import json, os
+p = os.environ.get("CONFIG_FILE", "/etc/sing-box/config.json")
+d = json.load(open(p))
+for ib in d.get("inbounds", []):
+    if ib.get("type") == "vless":
+        for u in ib.get("users", []):
+            u["uuid"] = os.environ["UUID"]
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
+      info "新 UUID: $NEW_UUID"
+      ;;
+    2)
+      _has_ws=0; grep -q '"tag": "vless-ws-tls"' "$CONFIG_FILE" && _has_ws=1
+      read -rp "Reality 端口 [当前 ${REALITY_PORT:-443}]: " _np1 || true
+      if [[ "$_has_ws" -eq 1 ]]; then read -rp "WS+TLS 端口 [当前 ${WS_PORT:-8443}]: " _np2 || true; else _np2=""; fi
+      read -rp "HY2 端口(UDP) [当前 ${HY2_PORT:-8444}]: " _np3 || true
+      for _pp in "${_np1:-}" "${_np2:-}" "${_np3:-}"; do
+        [[ -z "$_pp" ]] && continue
+        [[ "$_pp" =~ ^[0-9]+$ ]] && (( _pp >= 1 && _pp <= 65535 )) || pause_exit "端口不合法: $_pp"
+      done
+      [[ -n "${_np1:-}" ]] && REALITY_PORT="$_np1"
+      [[ -n "${_np2:-}" ]] && WS_PORT="$_np2"
+      [[ -n "${_np3:-}" ]] && HY2_PORT="$_np3"
+      if [[ "$REALITY_PORT" == "$WS_PORT" || "$REALITY_PORT" == "$HY2_PORT" ]]; then
+        pause_exit "Reality/WS/HY2 端口不能相同, 已中止 (备份在 ${CONFIG_FILE}.bak-*)"
+      fi
+      REALITY_PORT="$REALITY_PORT" WS_PORT="${WS_PORT:-}" HY2_PORT="$HY2_PORT" python3 - <<'PYEOF'
+import json, os
+p = os.environ.get("CONFIG_FILE", "/etc/sing-box/config.json")
+d = json.load(open(p))
+for ib in d.get("inbounds", []):
+    if ib.get("tag") == "vless-reality":
+        ib["listen_port"] = int(os.environ["REALITY_PORT"])
+    elif ib.get("tag") == "vless-ws-tls" and os.environ.get("WS_PORT"):
+        ib["listen_port"] = int(os.environ["WS_PORT"])
+    elif ib.get("tag") == "hy2":
+        ib["listen_port"] = int(os.environ["HY2_PORT"])
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
+      open_firewall
+      ;;
+    3)
+      read -rp "Reality 地址 [当前 ${REALITY_ADDR:-${DOMAIN:-$SERVER_IP}}]: " _na || true
+      _na="$(echo "${_na:-}" | xargs)"
+      [[ -n "$_na" ]] && REALITY_ADDR="$_na"
+      info "Reality 地址: $REALITY_ADDR (仅客户端链接变化, 服务端无需改动)"
+      ;;
+    4)
+      HY2_PASS="$(rand_hex 12)"; HY2_OBFS="$(rand_hex 8)"
+      HY2_PASS="$HY2_PASS" HY2_OBFS="$HY2_OBFS" python3 - <<'PYEOF'
+import json, os
+p = os.environ.get("CONFIG_FILE", "/etc/sing-box/config.json")
+d = json.load(open(p))
+for ib in d.get("inbounds", []):
+    if ib.get("type") == "hysteria2":
+        ib["users"][0]["password"] = os.environ["HY2_PASS"]
+        ib["obfs"] = {"type": "salamander", "password": os.environ["HY2_OBFS"]}
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
+      info "新 HY2 密码: $HY2_PASS  混淆密码: $HY2_OBFS"
+      ;;
+    *) info "已取消"; return 0 ;;
+  esac
+
+  chmod 600 "$CONFIG_FILE"
+  sing-box check -c "$CONFIG_FILE" || pause_exit "配置校验失败, 请从 ${CONFIG_FILE}.bak-* 恢复"
+  # 回写 meta.env
+  UUID="${UUID:-}" HY2_PASS="${HY2_PASS:-}" HY2_OBFS="${HY2_OBFS:-}" REALITY_ADDR="${REALITY_ADDR:-}" \
+  REALITY_PORT="${REALITY_PORT:-}" WS_PORT="${WS_PORT:-}" HY2_PORT="${HY2_PORT:-}" python3 - <<'PYEOF'
+import os
+p = os.environ.get("CONFIG_DIR", "/etc/sing-box") + "/meta.env"
+meta = {}
+try:
+    for line in open(p):
+        line = line.strip()
+        if line and "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            meta[k.strip()] = v.strip()
+except FileNotFoundError:
+    pass
+for k in ["UUID", "HY2_PASS", "HY2_OBFS", "REALITY_ADDR", "REALITY_PORT", "WS_PORT", "HY2_PORT"]:
+    v = os.environ.get(k, "")
+    if v:
+        meta[k] = v
+open(p, "w").write("".join(f"{k}={v}\n" for k, v in meta.items()))
+PYEOF
+  systemctl restart sing-box
+  sleep 1
+  systemctl is-active --quiet sing-box || pause_exit "重启失败, 备份在 ${CONFIG_FILE}.bak-*"
+  info "修改生效, 新节点信息:"
+  show_info
+}
+
+show_menu() {
+  check_root
+  while true; do
+    echo
+    echo "========== sing-box 管理菜单 =========="
+    echo "  1) 更新内核 (保留现有节点配置)"
+    echo "  2) 查看节点信息"
+    echo "  3) 修改配置 (UUID/端口/Reality地址/HY2密码)"
+    echo "  4) 完全卸载 (删除配置)"
+    echo "  0) 退出"
+    read -rp "请选择 [0-4]: " _m || { echo; exit 0; }
+    case "$_m" in
+      1) do_update ;;
+      2) show_info ;;
+      3) do_edit_config ;;
+      4) do_uninstall; exit 0 ;;
+      0) exit 0 ;;
+      *) warn "无效选项: ${_m:-空}, 请重选" ;;
+    esac
+    read -rp "按回车返回菜单..." _pause || exit 0
+  done
+}
+
+do_update() {
+  check_root
+  check_os
+  step "更新 sing-box 内核 (保留现有节点配置)"
+  [[ -f "$CONFIG_FILE" ]] || pause_exit "未找到 $CONFIG_FILE, 请先安装"
+  cp -f "$CONFIG_FILE" "${CONFIG_FILE}.bak-$(date +%F_%H%M)"
+  cp -f /usr/local/bin/sing-box /tmp/sing-box.old 2>/dev/null || true
+  info "当前: $(sing-box version 2>/dev/null | head -1 || echo unknown)"
+  info "配置已备份: ${CONFIG_FILE}.bak-*"
+  install_singbox   # 仅替换二进制, 不碰配置
+  if ! sing-box check -c "$CONFIG_FILE"; then
+    error "新内核校验旧配置失败, 正在回滚..."
+    [[ -f /tmp/sing-box.old ]] && install -m 755 /tmp/sing-box.old /usr/local/bin/sing-box
+    systemctl restart sing-box 2>/dev/null || true
+    pause_exit "已回滚到旧内核, 请先查看 sing-box changelog 是否有 breaking change"
+  fi
+  systemctl restart sing-box
+  sleep 2
+  systemctl is-active --quiet sing-box || pause_exit "重启失败, 备份在 ${CONFIG_FILE}.bak-*"
+  info "内核更新完成: $(sing-box version 2>/dev/null | head -1)"
+  info "节点配置未变, 可用 'sb' -> 2 查看"
 }
 
 do_uninstall() {
@@ -637,16 +795,19 @@ do_uninstall() {
   systemctl disable sing-box 2>/dev/null || true
   rm -f /etc/systemd/system/sing-box.service
   systemctl daemon-reload
-  rm -rf "$CONFIG_DIR" /usr/local/bin/sing-box "$INFO_FILE"
+  rm -rf "$CONFIG_DIR" /usr/local/bin/sing-box /usr/local/bin/sb "$INFO_FILE"
   echo -e "${GREEN}已卸载 (证书/acme.sh 保留, 如需删除 acme.sh 请手动 rm -rf ~/.acme.sh)${PLAIN}"
 }
 
 usage() {
   cat <<'EOF'
 用法:
-  install.sh                        交互式一键安装
+  install.sh                        交互式一键安装 (已安装时进管理菜单)
+  sb                                管理菜单 (安装后可用: 更新内核/查看/修改/卸载)
   install.sh --domain example.com   非交互安装 (配合其它参数)
   install.sh info                   显示节点信息
+  install.sh update                 只更新内核 (保留配置)
+  install.sh menu                   打开管理菜单
   install.sh --uninstall            卸载
   install.sh -h                     帮助
 
@@ -668,6 +829,8 @@ ACTION="install"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     info|show) ACTION="info"; shift ;;
+    update) ACTION="update"; shift ;;
+    menu) ACTION="menu"; shift ;;
     --uninstall|uninstall) ACTION="uninstall"; shift ;;
     --domain) DOMAIN="$2"; shift 2 ;;
     --domain=*) DOMAIN="${1#*=}"; shift ;;
@@ -693,6 +856,8 @@ done
 
 case "$ACTION" in
   info) show_info ;;
+  update) do_update ;;
+  menu) show_menu ;;
   uninstall) do_uninstall ;;
   install)
     if [[ $AUTO_YES -eq 1 || -n "$DOMAIN" ]]; then
@@ -703,7 +868,12 @@ case "$ACTION" in
       [[ -z "$EMAIL" && -n "$DOMAIN" ]] && EMAIL="admin@${DOMAIN}"
       install_singbox; write_config; setup_systemd; open_firewall
       cp -f "$0" "$SCRIPT_COPY" 2>/dev/null || true
+      ln -sf "$SCRIPT_COPY" /usr/local/bin/sb 2>/dev/null || true
+      info "管理命令: 直接输入 sb 打开管理菜单"
       show_info
+    elif [[ -f "$CONFIG_FILE" ]]; then
+      # 已安装且无参数: 进管理菜单 (sb 快捷命令即走此分支)
+      show_menu
     else
       do_install
     fi
